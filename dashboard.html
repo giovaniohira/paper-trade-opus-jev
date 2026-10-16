@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Paper Trade Agent</title>
+<style>
+:root{--bg:#fafaf9;--fg:#18181b;--mut:#71717a;--line:#e4e4e7;--up:#15803d;--dn:#b91c1c;--base:#a1a1aa}
+@media (prefers-color-scheme:dark){:root{--bg:#0c0c0d;--fg:#f4f4f5;--mut:#8b8b93;--line:#27272a;--up:#4ade80;--dn:#f87171;--base:#52525b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+main{max-width:1120px;margin:0 auto;padding:28px 16px 48px}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+h1{font-size:14px;font-weight:600;margin:0;letter-spacing:.02em}
+h2{font-size:11px;font-weight:500;color:var(--mut);text-transform:uppercase;letter-spacing:.08em;margin:32px 0 8px}
+button{font:inherit;color:var(--fg);background:none;border:1px solid var(--line);padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--mut)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:20px;margin:28px 0 20px}
+.k small{display:block;color:var(--mut);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em}
+.k b{font-size:20px;font-weight:600}
+canvas{width:100%;height:280px;display:block}
+.view{color:var(--mut);margin:12px 0 0;min-height:1.5em}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child,th.l,td.l{text-align:left}
+th{color:var(--mut);font-weight:400;font-size:11px}
+td.why{max-width:320px;overflow:hidden;text-overflow:ellipsis;color:var(--mut)}
+.up{color:var(--up)}.dn{color:var(--dn)}
+.empty{color:var(--mut);padding:10px 0}
+footer{color:var(--mut);margin-top:32px;font-size:11.5px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Paper Trade · Opus + Jev</h1>
+    <div><button id="exlog">Exportar log</button> <button id="excsv">Exportar trades CSV</button></div>
+  </header>
+  <div class="kpis" id="kpis"></div>
+  <canvas id="chart"></canvas>
+  <p class="view" id="view"></p>
+  <h2>Posições abertas</h2>
+  <div class="scroll" id="pos"></div>
+  <h2>Trades realizadas</h2>
+  <div class="scroll" id="trades"></div>
+  <footer id="status">conectando…</footer>
+</main>
+<script>
+let S = null;
+const $ = id => document.getElementById(id);
+const money = (n, sign) => (sign && n > 0 ? '+' : n < 0 ? '−' : '') + '$' + Math.abs(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const pct = n => (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n).toFixed(2) + '%';
+const px = n => n >= 100 ? n.toFixed(2) : n >= 1 ? n.toFixed(4) : n.toPrecision(4);
+const cls = n => n > 0 ? 'up' : n < 0 ? 'dn' : '';
+const hhmm = t => new Date(t * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+const mins = s => Math.floor(s / 60) + 'm' + String(Math.floor(s % 60)).padStart(2, '0') + 's';
+
+function table(cols, rows) {
+  if (!rows.length) return '<div class="empty">—</div>';
+  return '<table><tr>' + cols.map(c => `<th class="${c[2] || ''}">${c[0]}</th>`).join('') + '</tr>' +
+    rows.map(r => '<tr>' + cols.map(c => { const v = c[1](r); return `<td class="${c[2] || ''} ${v[1] || ''}" title="${v[2] || ''}">${v[0]}</td>`; }).join('') + '</tr>').join('') + '</table>';
+}
+
+function render() {
+  if (!S || !S.start) return;
+  const pnl = S.pnl, n = S.trades.length, left = Math.max(0, S.end - S.now);
+  $('kpis').innerHTML = [
+    ['Equity', money(S.equity)],
+    ['PnL', `<span class="${cls(pnl)}">${money(pnl, 1)}</span>`],
+    ['Retorno', `<span class="${cls(pnl)}">${pct(100 * pnl / S.start_cash)}</span>`],
+    ['Trades', n ? `${n} · ${Math.round(100 * S.wins / n)}% win` : '0'],
+    ['Taxas', money(S.fees)],
+    [S.done ? 'Sessão' : 'Restante', S.done ? 'encerrada' : mins(left)],
+  ].map(([k, v]) => `<div class="k"><small>${k}</small><b>${v}</b></div>`).join('');
+  $('view').textContent = S.opus.view ? 'Opus: ' + S.opus.view : '';
+  $('pos').innerHTML = table([
+    ['moeda', p => [p.sym], 'l'], ['lado', p => [p.side, p.side === 'long' ? 'up' : 'dn'], 'l'], ['estratégia', p => [p.strat], 'l'],
+    ['notional', p => [money(p.notional)]], ['entrada', p => [px(p.entry)]], ['preço', p => [px(p.px)]],
+    ['stop', p => [px(p.stop)]], ['alvo', p => [p.tp ? px(p.tp) : '—']],
+    ['PnL', p => [money(p.upnl, 1), cls(p.upnl)]], ['idade', p => [mins(S.now - p.opened)]],
+  ], S.positions);
+  $('trades').innerHTML = table([
+    ['hora', t => [hhmm(t.closed)], 'l'], ['moeda', t => [t.sym], 'l'], ['lado', t => [t.side, t.side === 'long' ? 'up' : 'dn'], 'l'],
+    ['estratégia', t => [t.strat], 'l'], ['notional', t => [money(t.notional)]], ['entrada', t => [px(t.entry)]], ['saída', t => [px(t.exit)]],
+    ['PnL', t => [money(t.pnl, 1), cls(t.pnl)]], ['%', t => [pct(t.pnl_pct), cls(t.pnl)]], ['duração', t => [mins(t.closed - t.opened)]],
+    ['motivo', t => [t.why_close, '', t.why_open + ' → ' + t.why_close], 'l why'],
+  ], S.trades.slice().reverse());
+  $('status').textContent = `Opus: ${S.opus.status} · ${S.opus.calls} decisões · ${S.opus.secs}s/decisão · $${S.opus.cost.toFixed(2)}   |   ` +
+    `Jev: ${S.jev.status} · ${S.jev.calls} chamadas · ${S.jev.ms}ms   |   ${S.universe.join(' ')}`;
+  draw();
+}
+
+function draw() {
+  const c = $('chart'), r = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  c.width = W * r; c.height = H * r;
+  const g = c.getContext('2d'); g.scale(r, r);
+  const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+  const pts = S.curve.length ? S.curve : [[S.start, S.start_cash]];
+  const ys = pts.map(p => p[1]).concat([S.start_cash]);
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  const pad = Math.max((hi - lo) * 0.15, S.start_cash * 0.002); lo -= pad; hi += pad;
+  const L = 8, R = 72, T = 12, B = 22;
+  const X = t => L + (t - S.start) / (S.end - S.start) * (W - L - R);
+  const Y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+  g.font = '11px ui-monospace,Menlo,Consolas,monospace';
+  // time axis: every 10 minutes
+  g.fillStyle = css('--mut'); g.strokeStyle = css('--line'); g.lineWidth = 1;
+  for (let m = 0; m <= (S.end - S.start) / 60; m += 10) {
+    const x = X(S.start + m * 60);
+    g.beginPath(); g.moveTo(x, T); g.lineTo(x, H - B); g.stroke();
+    g.fillText(m + 'm', x - 8, H - 6);
+  }
+  // start baseline
+  const yb = Y(S.start_cash);
+  g.strokeStyle = css('--base'); g.setLineDash([4, 4]);
+  g.beginPath(); g.moveTo(L, yb); g.lineTo(W - R, yb); g.stroke(); g.setLineDash([]);
+  g.fillStyle = css('--mut'); g.fillText('start ' + money(S.start_cash).replace('.00', ''), W - R + 6, yb + 4);
+  // equity line
+  const last = pts[pts.length - 1][1], col = css(last >= S.start_cash ? '--up' : '--dn');
+  g.strokeStyle = col; g.lineWidth = 1.6; g.lineJoin = 'round';
+  g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1]))); g.stroke();
+  // start point and live point
+  g.fillStyle = css('--fg'); g.beginPath(); g.arc(X(S.start), yb, 3.5, 0, 7); g.fill();
+  const lp = pts[pts.length - 1];
+  g.fillStyle = col; g.beginPath(); g.arc(X(lp[0]), Y(lp[1]), 3.5, 0, 7); g.fill();
+  if (Math.abs(Y(lp[1]) - yb) > 12) g.fillText(money(lp[1]).replace(/\.\d+$/, ''), W - R + 6, Y(lp[1]) + 4);
+  // closed trades as ticks on the curve
+  S.trades.forEach(t => {
+    const p = pts.reduce((a, b) => Math.abs(b[0] - t.closed) < Math.abs(a[0] - t.closed) ? b : a);
+    g.fillStyle = css(t.pnl >= 0 ? '--up' : '--dn');
+    g.fillRect(X(t.closed) - 1, Y(p[1]) - 7, 2, 14);
+  });
+}
+
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type}));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+$('exlog').onclick = async () => download('paper-trade-log.jsonl', await (await fetch('/log')).text(), 'application/x-ndjson');
+$('excsv').onclick = () => {
+  const k = ['id', 'sym', 'side', 'strat', 'entry', 'exit', 'qty', 'notional', 'pnl', 'pnl_pct', 'fees', 'opened', 'closed', 'why_open', 'why_close'];
+  const esc = v => typeof v === 'string' ? '"' + v.replace(/"/g, '""') + '"' : v;
+  download('trades.csv', [k.join(',')].concat((S ? S.trades : []).map(t => k.map(x => esc(t[x])).join(','))).join('\n'), 'text/csv');
+};
+addEventListener('resize', () => S && draw());
+(async function poll() {
+  try { S = await (await fetch('/state', {cache: 'no-store'})).json(); render(); } catch (e) { $('status').textContent = 'sem conexão com o bot'; }
+  setTimeout(poll, 2000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mayhem Paper</title>
+<style>
+:root{color-scheme:light;--bg:#fcfcfb;--fg:#0b0b0b;--mut:#52514e;--faint:#8a8983;--line:#e4e3df;--base:#a3a29c;
+  --s1:#2a78d6;--s2:#eb6834;--up:#008300;--dn:#c53b3a}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;--bg:#1a1a19;--fg:#fff;
+  --mut:#c3c2b7;--faint:#8e8d86;--line:#2e2e2c;--base:#5d5c57;--s1:#3987e5;--s2:#d95926;--up:#4cc16a;--dn:#e66767}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#1a1a19;--fg:#fff;--mut:#c3c2b7;--faint:#8e8d86;--line:#2e2e2c;
+  --base:#5d5c57;--s1:#3987e5;--s2:#d95926;--up:#4cc16a;--dn:#e66767}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+main{max-width:1180px;margin:0 auto;padding:28px 16px 48px}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+h1{font-size:14px;font-weight:600;margin:0}
+h1 span{color:var(--mut);font-weight:400}
+h2{font-size:11px;font-weight:500;color:var(--mut);text-transform:uppercase;letter-spacing:.08em;margin:30px 0 8px}
+button{font:inherit;color:var(--fg);background:none;border:1px solid var(--line);padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--faint)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:16px;margin:24px 0 8px}
+.k small{display:block;color:var(--mut);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em}
+.k b{font-size:17px;font-weight:600}
+.legend{display:flex;gap:18px;flex-wrap:wrap;color:var(--mut);margin:18px 0 6px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.wrap{position:relative}
+canvas{width:100%;height:300px;display:block}
+#tip{position:absolute;pointer-events:none;background:var(--bg);border:1px solid var(--line);padding:8px 10px;
+  display:none;white-space:nowrap;font-size:12px;box-shadow:0 2px 10px rgba(0,0,0,.08)}
+#tip i{display:inline-block;width:14px;height:0;border-top:2px solid;vertical-align:middle;margin-right:6px}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child,.l{text-align:left}
+th{color:var(--mut);font-weight:400;font-size:11px}
+td.why{max-width:340px;overflow:hidden;text-overflow:ellipsis;color:var(--mut)}
+.up{color:var(--up)}.dn{color:var(--dn)}
+.empty{color:var(--mut);padding:10px 0}
+.note{color:var(--mut);font-size:11.5px;margin:6px 0 0}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Mayhem Paper <span>· pump.fun · só leitura, sem carteira</span></h1>
+    <div><button id="exlog">Exportar log</button> <button id="excsv">Exportar trades CSV</button></div>
+  </header>
+  <div class="kpis" id="rec"></div>
+  <h2>Estratégias vs controle aleatório</h2>
+  <div class="scroll" id="summary"></div>
+  <p class="note" id="note"></p>
+  <div class="legend" id="legend"></div>
+  <div class="wrap"><canvas id="chart"></canvas><div id="tip"></div></div>
+  <h2>Posições abertas</h2>
+  <div class="scroll" id="pos"></div>
+  <h2>Trades realizadas</h2>
+  <div class="scroll" id="trades"></div>
+</main>
+<script>
+const SERIES = {
+  momentum: {color: '--s1', dash: []}, ctrl_momentum: {color: '--s1', dash: [6, 4]},
+  agent_dip: {color: '--s2', dash: []}, ctrl_dip: {color: '--s2', dash: [6, 4]},
+};
+let S = null, hoverX = null;
+const $ = id => document.getElementById(id);
+const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+const sol = (n, sign) => (sign && n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n).toFixed(3) + ' SOL';
+const pct = n => (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n).toFixed(1) + '%';
+const usd = n => (n < 0 ? '−$' : '$') + Math.abs(n).toLocaleString('en-US', {maximumFractionDigits: 0});
+const cls = n => n > 0 ? 'up' : n < 0 ? 'dn' : '';
+const hhmm = t => new Date(t * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
+const dur = s => s < 3600 ? Math.floor(s / 60) + 'm' + String(Math.floor(s % 60)).padStart(2, '0') + 's' : (s / 3600).toFixed(1) + 'h';
+const label = n => (S.accounts.find(a => a.name === n) || {label: n}).label;
+const swatch = n => `<svg width="18" height="6"><line x1="0" y1="3" x2="18" y2="3" stroke="${css(SERIES[n].color)}" stroke-width="2" stroke-dasharray="${SERIES[n].dash.join(' ')}"/></svg>`;
+
+function table(cols, rows) {
+  if (!rows.length) return '<div class="empty">—</div>';
+  return '<table><tr>' + cols.map(c => `<th class="${c[2] || ''}">${c[0]}</th>`).join('') + '</tr>' +
+    rows.map(r => '<tr>' + cols.map(c => { const v = c[1](r); return `<td class="${c[2] || ''} ${v[1] || ''}" title="${(v[2] || '').replace(/"/g, '&quot;')}">${v[0]}</td>`; }).join('') + '</tr>').join('') + '</table>';
+}
+
+function render() {
+  const r = S.rec, el = S.now - S.start;
+  $('rec').innerHTML = [
+    ['Rodando', dur(el)],
+    ['Coins Mayhem ativas', r.coins],
+    ['Trades Mayhem', r.m_trades.toLocaleString('pt-BR')],
+    ['Feitos pelo agente', r.m_trades ? Math.round(100 * r.agent_trades / r.m_trades) + '%' : '—'],
+    ['Lag do stream', r.lag == null ? '—' : r.lag.toFixed(1) + 's'],
+    ['Buracos no stream', r.reconnects ? `${r.reconnects}× · ${r.gap_secs}s` : 'nenhum'],
+    ['SOL', S.sol_usd ? '$' + S.sol_usd.toFixed(2) : '—'],
+  ].map(([k, v]) => `<div class="k"><small>${k}</small><b>${v}</b></div>`).join('');
+  const u = S.sol_usd;
+  $('summary').innerHTML = table([
+    ['estratégia', a => [swatch(a.name) + ' ' + a.label], 'l'],
+    ['equity', a => [a.value.toFixed(3) + ' SOL']],
+    ['PnL', a => [sol(a.value - S.start_sol, 1), cls(a.value - S.start_sol)]],
+    ['PnL %', a => [pct(100 * (a.value / S.start_sol - 1)), cls(a.value - S.start_sol)]],
+    ['PnL USD', a => [u ? usd((a.value - S.start_sol) * u) : '—', cls(a.value - S.start_sol)]],
+    ['trades', a => [a.trades]], ['win', a => [a.trades ? Math.round(100 * a.wins / a.trades) + '%' : '—']],
+    ['média/trade', a => [a.trades ? pct(a.avg) : '—', cls(a.avg)]],
+    ['abertas', a => [a.open]], ['falhas', a => [a.fails, '', 'buy que chegaria >15% acima do preço da decisão']],
+  ], S.accounts);
+  $('note').textContent = `Cada estratégia tem ${S.start_sol} SOL de papel e entra com ${S.size_sol} SOL por trade. ` +
+    `Custos: 1,25% de taxa por lado, impacto na curva, ${'1,5s'} de latência e tx fee. A estratégia só tem edge se superar o controle aleatório (linha tracejada da mesma cor), que usa as mesmas saídas.`;
+  $('legend').innerHTML = S.accounts.map(a => `<span>${swatch(a.name)}${a.label}</span>`).join('') +
+    `<span><svg width="18" height="6"><line x1="0" y1="3" x2="18" y2="3" stroke="${css('--base')}" stroke-width="1" stroke-dasharray="3 3"/></svg>start ${S.start_sol} SOL</span>`;
+  $('pos').innerHTML = table([
+    ['estratégia', p => [label(p.strat)], 'l'], ['coin', p => [p.sym, '', p.mint], 'l'],
+    ['mcap entrada', p => [p.mcap_in.toFixed(0) + ' SOL']], ['mcap agora', p => [p.mcap.toFixed(0) + ' SOL']],
+    ['custo', p => [p.cost.toFixed(3)]], ['valor', p => [p.value.toFixed(3)]], ['%', p => [pct(p.pct), cls(p.pct)]],
+    ['idade', p => [dur(S.now - p.opened)]], ['motivo', p => [p.why, '', p.why], 'l why'],
+  ], S.positions);
+  $('trades').innerHTML = table([
+    ['hora', t => [hhmm(t.closed)], 'l'], ['estratégia', t => [label(t.strat)], 'l'], ['coin', t => [t.sym, '', t.mint], 'l'],
+    ['mcap in→out', t => [t.mcap_in.toFixed(0) + '→' + t.mcap_out.toFixed(0)]],
+    ['PnL', t => [sol(t.pnl, 1), cls(t.pnl)]], ['%', t => [pct(t.pct), cls(t.pct)]],
+    ['duração', t => [dur(t.closed - t.opened)]],
+    ['saída', t => [t.why_close, '', t.why_open + ' → ' + t.why_close], 'l why'],
+  ], S.trades.slice().reverse());
+  draw();
+}
+
+function draw() {
+  const c = $('chart'), r = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  c.width = W * r; c.height = H * r;
+  const g = c.getContext('2d'); g.scale(r, r);
+  const all = S.accounts.flatMap(a => a.curve.map(p => p[1])).concat([S.start_sol]);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  const pad = Math.max((hi - lo) * 0.12, 0.05); lo -= pad; hi += pad;
+  const t0 = S.start, t1 = Math.max(S.now, t0 + 600), L = 8, R = 150, T = 10, B = 22;
+  const X = t => L + (t - t0) / (t1 - t0) * (W - L - R), Y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+  g.font = '11px ui-monospace,Menlo,Consolas,monospace';
+  const step = [1, 2, 5, 10, 15, 30, 60, 120, 240, 480, 720].find(m => (t1 - t0) / (m * 60) <= 7) * 60 || 86400;
+  g.strokeStyle = css('--line'); g.fillStyle = css('--mut'); g.lineWidth = 1;
+  for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) {
+    g.beginPath(); g.moveTo(X(t), T); g.lineTo(X(t), H - B); g.stroke(); g.fillText(hhmm(t), X(t) - 16, H - 6);
+  }
+  const yb = Y(S.start_sol);
+  g.strokeStyle = css('--base'); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(L, yb); g.lineTo(W - R, yb); g.stroke();
+  g.setLineDash([]); g.fillStyle = css('--fg'); g.beginPath(); g.arc(X(t0), yb, 3.5, 0, 7); g.fill();
+  const ends = [];
+  S.accounts.forEach(a => {
+    const s = SERIES[a.name], pts = [[t0, S.start_sol], ...a.curve];
+    g.strokeStyle = css(s.color); g.lineWidth = 2; g.setLineDash(s.dash); g.lineJoin = 'round';
+    g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1]))); g.stroke();
+    g.setLineDash([]);
+    const last = pts[pts.length - 1]; ends.push({y: Y(last[1]), x: X(last[0]), a});
+  });
+  ends.sort((p, q) => p.y - q.y);  // direct labels, pushed apart so they never overlap
+  for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 13);
+  ends.forEach(e => {
+    const s = SERIES[e.a.name];
+    g.strokeStyle = css(s.color); g.lineWidth = 2; g.setLineDash(s.dash);
+    g.beginPath(); g.moveTo(W - R + 6, e.y); g.lineTo(W - R + 18, e.y); g.stroke(); g.setLineDash([]);
+    g.fillStyle = css('--fg'); g.fillText(e.a.label, W - R + 22, e.y + 4);
+  });
+  const tip = $('tip');
+  if (hoverX == null || hoverX < L || hoverX > W - R) { tip.style.display = 'none'; return; }
+  const th = t0 + (hoverX - L) / (W - L - R) * (t1 - t0);
+  g.strokeStyle = css('--faint'); g.lineWidth = 1; g.beginPath(); g.moveTo(hoverX, T); g.lineTo(hoverX, H - B); g.stroke();
+  const rows = S.accounts.map(a => {
+    const pts = [[t0, S.start_sol], ...a.curve];
+    const p = pts.reduce((x, y) => Math.abs(y[0] - th) < Math.abs(x[0] - th) ? y : x);
+    g.fillStyle = css(SERIES[a.name].color); g.beginPath(); g.arc(X(p[0]), Y(p[1]), 4, 0, 7); g.fill();
+    return `<div><i style="border-color:${css(SERIES[a.name].color)};border-top-style:${SERIES[a.name].dash.length ? 'dashed' : 'solid'}"></i>${a.label} <b>${p[1].toFixed(3)}</b> <span class="${cls(p[1] - S.start_sol)}">${sol(p[1] - S.start_sol, 1)}</span></div>`;
+  });
+  tip.innerHTML = `<div style="color:var(--mut);margin-bottom:4px">${hhmm(th)}</div>` + rows.join('');
+  tip.style.display = 'block';
+  tip.style.left = Math.min(hoverX + 14, W - tip.offsetWidth - 4) + 'px'; tip.style.top = '14px';
+}
+
+$('chart').addEventListener('mousemove', e => { hoverX = e.offsetX; S && draw(); });
+$('chart').addEventListener('mouseleave', () => { hoverX = null; S && draw(); });
+addEventListener('resize', () => S && draw());
+function download(name, text, type) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], {type}));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+$('exlog').onclick = async () => download('mayhem-paper-log.jsonl', await (await fetch('/log')).text(), 'application/x-ndjson');
+$('excsv').onclick = () => {
+  const k = ['strat', 'sym', 'mint', 'opened', 'closed', 'cost', 'got', 'pnl', 'pct', 'mcap_in', 'mcap_out', 'why_open', 'why_close'];
+  const esc = v => typeof v === 'string' ? '"' + v.replace(/"/g, '""') + '"' : v;
+  download('mayhem-trades.csv', [k.join(',')].concat((S ? S.trades : []).map(t => k.map(x => esc(t[x])).join(','))).join('\n'), 'text/csv');
+};
+(async function poll() {
+  try { const s = await (await fetch('/state', {cache: 'no-store'})).json(); if (s.accounts) { S = s; render(); } } catch (e) {}
+  setTimeout(poll, 2000);
+})();
+</script>
+</body>
+</html>
